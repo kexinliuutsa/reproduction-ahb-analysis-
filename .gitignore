@@ -1,0 +1,6 @@
+logs/
+gesture_recordings/
+asdf.png
+__pycache__/
+.ipynb_checkpoints/
+*.pyc
