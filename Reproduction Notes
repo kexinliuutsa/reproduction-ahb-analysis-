@@ -1,0 +1,129 @@
+# Reproduction Notes: Issues Encountered & Solutions
+
+This document logs the practical issues encountered while reproducing the analysis pipeline from the AHB paper, and how each was resolved. Intended to save time for anyone else attempting the same reproduction.
+
+## 1. Missing dependency: `torch`
+
+**Issue:** The original `requirements.txt` only lists `numpy, pandas, matplotlib, scipy, scikit-learn, seaborn, xgboost`, but the codebase internally imports `torch` (in `analysis/processing/calculate_roc_auc_from_feature.py`). This was not documented.
+
+**Fix:**
+```bash
+pip install torch tqdm
+```
+
+## 2. xgboost fails to load on macOS (OpenMP missing)
+
+**Issue:** XGBoostError: XGBoost Library (libxgboost.dylib) could not be loaded. Symbol not found: ___kmpc_dispatch_deinit
+The newly installed `xgboost` (v3.x) requires the OpenMP runtime, which is not installed by default on macOS.
+
+**Fix:** Two-part solution:
+```bash
+brew install libomp
+pip uninstall xgboost -y
+pip install xgboost==1.7.6
+```
+Downgrading to `xgboost==1.7.6` was more reliable than getting the newest version's OpenMP linkage working correctly on this machine. After any reinstall, **restart the Jupyter kernel** before re-running cells — package state can persist incorrectly otherwise.
+
+## 3. Outdated function name: `cleanse_into_swipe`
+
+**Issue:** ImportError: cannot import name 'cleanse_into_swipe' from 'analysis.processing.extract_feature_of_swipes'
+The function was renamed to `deprecated_cleanse_into_swipe` in the current codebase version, but the notebook's import statement wasn't updated to match.
+
+**Fix:** Updated the import with an alias:
+```python
+from analysis.processing.extract_feature_of_swipes import deprecated_cleanse_into_swipe as cleanse_into_swipe
+```
+
+## 4. Hardcoded search path: `Path("logs/")`
+
+**Issue:** `gesture_log_reader_utils.py` (line 368) hardcodes the file search scope to `Path("logs/")`. This breaks if the local data folder structure differs (e.g. data extracted into `gesture_recordings/` instead of `logs/`).
+
+**Fix:** Either (a) rename/restructure local folders to match `logs/`, or (b) widen the search scope in the source file:
+```bash
+sed -i '' 's|Path("logs/")|Path(".")|' analysis/lib/gesture_log_reader_utils.py
+```
+Option (b) is more robust since it searches the entire project directory regardless of subfolder naming, but **requires restarting the kernel** for the change to take effect.
+
+## 5. Dataset split across many partial zip archives (human data)
+
+**Issue:** Human session data on HuggingFace is not bundled into one archive. It's split across at least four separate files (`gesture_recording_o_2025_10_2026_01.zip`, `gesture_recording_2025111x.zip`, `logs_user123_1011_till_1015_gesture_recording.zip`, `logs_user4567_gesture_recording.zip`), each covering a different date range / user subset. Downloading only one zip results in a large number of "file not found" errors when cross-referencing against `Formated_Data_Renamed.xlsx`.
+
+**Diagnosis approach:** Wrote a small verification script to check, for each participant column in the metadata table, how many referenced log files actually exist locally:
+```python
+import os
+missing, found = [], []
+for col in humans:
+    for idx, timestamp in formatted_data_timestamps [col].items():
+        if not isinstance(timestamp, str): continue
+        ts = timestamp.strip()
+        if ts in ("", "c_switch_app"): continue
+        target = "gesture_recording_" + ts + ".log"
+        result = any(target in files for _, _, files in os.walk("."))
+        (found if result else missing).append((col, ts))
+print(f"found: {len(found)}, missing: {len(missing)}")
+```
+This made it possible to confirm exactly which date ranges were missing, rather than debugging file-by-file.
+
+**Fix:** Downloaded all four human-data zip archives and extracted them as separate subfolders under `logs/` (no need to merge them manually — the search-path fix in #4 finds files regardless of subfolder).
+
+## 6. `git clone` over HTTPS fails (network connectivity)
+
+**Issue:** fatal: unable to access '...': Failed to connect to github.com port 443
+                                                                                                              
+Both `git clone` of the GitHub repo and `git clone` of the HuggingFace dataset (which uses git-LFS-like protocol) failed with connection errors, suggesting the network environment blocks or throttles HTTPS git traffic to these hosts.
+
+**Fix:** Switched to the `huggingface_hub` Python library, which downloads over plain HTTPS file requests rather than the git protocol, and was not affected by the same connectivity issue:
+```python
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id="lyyang2766/Passing-the-Turing-Test-on-Screen-Agent-Humanization-Benchmark",
+    repo_type="dataset",
+    allow_patterns=["gesture_recordings/<specific_subfolder>/*"],
+    local_dir="."
+)
+``
+
+## 7. Partial downloads fail silently
+
+**Issue:** A `snapshot_download` call reported "Fetching 47 files" but only 24 files ended up in the local folder on first inspection — no error was raised.
+
+**Diagnosis:** Used `HfApi.list_repo_files()` to get the authoritative remote file count and compare against `os.listdir()` locally:
+```python
+from huggingface_hub import HfApi
+api = HfApi()
+files = api.list_repo_files(repo_id="...", repo_type="dataset")
+```
+This was essential because the discrepancy turned out to be a false alarm in one case (re-running `snapshot_download` simply confirmed all needed files were already present — the apparent "missing" count was due to comparing against the wrong filter/baseline) but in general this pattern (verify remote vs. local count, don't trust the progress bar alone) is necessary whenever downloads are split across multiple `allow_patterns` calls.
+
+## 8. Functions sweeping *all* agent categories fail when some categories' data isn't downloaded
+
+**Issue:** Several notebook cells (e.g. `execute_swipe_count_individual_participants`, `execute_tap_count_individual_participants`, `execute_tap_duration_individual_participants`) iterate over `humans + non_humanized_agents + humanized_agents + rot_humanized_agents + fake_rot_tap_humanized_agents` as a single combined list. If even one agent category (e.g. GPT-4o) has incomplete local data, the entire cell throws `FileNotFoundError` partway through — there's no per-category isolation.
+
+**Fix:** Either download the complete data for *all* categories referenced in a given cell before running it, or temporarily narrow the relevant list (e.g. `non_humanized_agents = ["ui-tars no humanity"]`) to scope the analysis to available data, restoring the full list afterward.
+
+## General Lessons
+
+- Always **restart the Jupyter kernel** after: installing/reinstalling a package, or editing a `.py` file the notebook imports from. Python caches imports; stale state causes confusing errors that look unrelated to the actual fix.
+- When a `FileNotFoundError` appears deep in a long warning/log dump, scroll to find the *specific* missing filename — cross-reference it against the metadata Excel to identify which participant/agent column it belongs to, rather than assuming the whole pipeline is broken.
+- Verify data completeness programmatically (compare local file counts against the source-of-truth listing) rather than trusting download progress indicators alone.                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
+                                                                                                              
