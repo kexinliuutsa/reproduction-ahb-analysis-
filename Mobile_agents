@@ -1,1 +1,154 @@
+This file will introduce the real mobile agents experiment environment，然后对比一下整个实验花费
+
+第一步：environment Setup
+Device: I used Huawei Nova 6
+原作者文档里有几个对你直接有用的东西：
+1. fake_adb wrapper
+路径在agent_tools/fake_adb/——这是作者用来给agent加humanization的核心工具。它拦截正常的adb命令，在执行前加入人类化的轨迹变换。这正是我们要做的事情！
+2. data_collection/main.py
+完整的数据采集脚本，能同时录制：
+
+手势（MotionEvent）
+传感器数据
+屏幕录像
+时间戳
+
+3. tasks.csv
+原作者已经定义好了任务分类，你不需要重新设计，直接用他们的任务就行。
+Agents I tried: 
+1/ DeepSeek: https://platform.deepseek.com/api_keys
+deepseek-v4-flash
+deepseek-v4-pro
+These models are 纯文本模型，暂时还不支持视觉输入
+
+
+2/ Siliconflow: siliconflow.cn
+有很多视觉模型：
+视觉模型列表:
+  Qwen/Qwen3-VL-Embedding-8B
+  Qwen/Qwen3-VL-Reranker-8B
+  PaddlePaddle/PaddleOCR-VL-1.5
+  Qwen/Qwen3-VL-32B-Instruct
+  Qwen/Qwen3-VL-32B-Thinking
+  Qwen/Qwen3-VL-8B-Instruct
+  Qwen/Qwen3-VL-8B-Thinking
+  Qwen/Qwen3-VL-30B-A3B-Instruct
+  Qwen/Qwen3-VL-30B-A3B-Thinking
+
+step 1就是我们可以先用以下的代码测试一下这个模型是否可以读image：
+# 测试视觉模型能不能看图
+screenshot = take_screenshot()
+
+response = client_sf.chat.completions.create(
+    model="Qwen/Qwen3-VL-8B-Instruct",
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data: image/png;base64,{screenshot}"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "这个手机屏幕上显示的是什么？用一句话描述。"
+                }
+            ]
+        }
+    ],
+    max_tokens=100
+)
+
+print(response.choices[0].message.content)
+
+基础代码：def execute_action(action):
+    """执行agent决定的动作"""
+    if action['type'] == 'tap':
+        x, y = int(action['x']), int(action['y'])
+        subprocess.run(['adb', 'shell', 'input', 'tap', str(x), str(y)])
+        print(f"执行tap: ({x}, {y})")
+        
+    elif action['type'] == 'swipe':
+        x1,y1,x2,y2 = int(action['x1']),int(action['y1']),int(action['x2']),int(action['y2'])
+        duration = int(action.get('duration', 500))
+        subprocess.run(['adb', 'shell', 'input', 'swipe', 
+                       str(x1), str(y1), str(x2), str(y2), str(duration)])
+        print(f"执行swipe: ({x1},{y1})→({x2},{y2})")
+        
+    elif action['type'] == 'back':
+        subprocess.run(['adb', 'shell', 'input', 'keyevent', '4'])
+        print("执行back")
+        
+    elif action['type'] == 'home':
+        subprocess.run(['adb', 'shell', 'input', 'keyevent', '3'])
+        print("执行home")
+        
+    elif action['type'] == 'finished':
+        print("任务完成")
+        return True
+    
+    return False
+
+print("execute_action已更新，现在重新跑任务...")
+
+# 重新跑
+subprocess.run(['adb', 'shell', 'input', 'keyevent', '3'])
+time.sleep(1)
+subprocess.run(['adb', 'shell', 'monkey', '-p', 'tv.danmaku.bili', '1'])
+time.sleep(3)
+
+task = "在哔哩哔哩里搜索'熊猫'，点击第一个视频"
+history = []
+max_steps = 8
+
+print(f"=== Naive Agent 开始 ===")
+print(f"任务: {task}\n")
+
+for step in range(max_steps):
+    print(f"\n第{step+1}步:")
+    screenshot = take_screenshot()
+    
+    try:
+        action = get_agent_action_vision(
+            client_sf, screenshot, task, history, NAIVE_SYSTEM_PROMPT
+        )
+        history.append(action)
+        done = execute_action(action)
+        if done:
+            print("任务完成！")
+            break
+    except Exception as e:
+        print(f"错误: {e}")
+        break
+    
+    time.sleep(2)
+
+print("\n=== Naive Agent 结束 ===")
+print(f"共执行{len(history)}步")
+
+comments：Qwen3-VL-8B这个模型太小，GUI理解能力不够强，经常点错位置、输出格式不稳定。
+
+
+
+
+
+Next Model Tried: OpenAI API Keys: https://openai.com/index/openai-api/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
